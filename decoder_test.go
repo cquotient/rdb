@@ -5,8 +5,10 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
+	"math"
 
-	"github.com/cupcake/rdb"
+	"github.com/cquotient/rdb"
 	. "gopkg.in/check.v1"
 )
 
@@ -35,7 +37,13 @@ func (s *DecoderSuite) TestMultipleDatabases(c *C) {
 
 func (s *DecoderSuite) TestExpiry(c *C) {
 	r := decodeRDB("keys_with_expiry")
-	c.Assert(r.expiries[0]["expires_ms_precision"], Equals, int64(1671963072573))
+	now := time.Now().Unix()
+	var expectedExpiry int64 = 1671963071
+	// Because the expiry is now just an offset from the current time,
+	// give ourselves a few seconds of margin when testing these values
+	actualExpiry := now + r.expiries[0]["expires_ms_precision"]
+	diff := math.Abs(float64(expectedExpiry - actualExpiry))
+	c.Assert(diff <= 2, Equals, true)
 }
 
 func (s *DecoderSuite) TestMixedExpiry(c *C) {

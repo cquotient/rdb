@@ -9,6 +9,7 @@ import (
 	"io"
 	"math"
 	"strconv"
+	"time"
 
 	"github.com/cupcake/rdb/crc64"
 )
@@ -190,13 +191,13 @@ func (d *decode) decode() error {
 			if err != nil {
 				return err
 			}
-			expiry = int64(binary.LittleEndian.Uint64(d.intBuf))
+			expiry = d.msSinceEpochToSeconds(int64(binary.LittleEndian.Uint64(d.intBuf)))
 		case rdbFlagExpiry:
 			_, err := io.ReadFull(d.r, d.intBuf[:4])
 			if err != nil {
 				return err
 			}
-			expiry = int64(binary.LittleEndian.Uint32(d.intBuf)) * 1000
+			expiry = d.msSinceEpochToSeconds(int64(binary.LittleEndian.Uint32(d.intBuf)) * 1000)
 		case rdbFlagSelectDB:
 			if !firstDB {
 				d.event.EndDatabase(int(db))
@@ -224,6 +225,13 @@ func (d *decode) decode() error {
 	}
 
 	panic("not reached")
+}
+
+func (d *decode) msSinceEpochToSeconds(msSinceEpoch int64) int64 {
+	// Time since epoch, in milliseconds
+	millis := time.Now().UnixNano() / 1000000
+	// Diff input against now time and divide by 1000 to get seconds from now
+	return (msSinceEpoch - millis) / 1000
 }
 
 func (d *decode) readObject(key []byte, typ ValueType, expiry int64) error {
