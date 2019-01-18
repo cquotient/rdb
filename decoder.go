@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"errors"
 	"strconv"
 
 	"github.com/cupcake/rdb/crc64"
@@ -51,6 +52,12 @@ type Decoder interface {
 	// StartZSet is called at the beginning of a sorted set.
 	// Zadd will be called exactly cardinality times before EndZSet.
 	StartZSet(key []byte, cardinality, expiry int64)
+	// StartStream is called at the beginning of a stream.
+	StartStream(key []byte, cardinality, expiry int64)
+	// StreamListPack is called when a listpack is inserted into a stream
+	StreamListPack(key []byte, entry_id string, data string)
+	// EndStream is called at the end of a stream
+	EndStream(key []byte, items int, eid string, info []StreamCgroupData)
 	// Zadd is called once for each member of a sorted set.
 	Zadd(key []byte, score float64, member []byte)
 	// EndZSet is called when there are no more members in a sorted set.
@@ -109,12 +116,13 @@ const (
 	TypeZSet2  ValueType = 5
 	TypeModule ValueType = 6
 
-	TypeHashZipmap    ValueType = 9
-	TypeListZiplist   ValueType = 10
-	TypeSetIntset     ValueType = 11
-	TypeZSetZiplist   ValueType = 12
-	TypeHashZiplist   ValueType = 13
-	TypeListQuicklist ValueType = 14
+	TypeHashZipmap      ValueType = 9
+	TypeListZiplist     ValueType = 10
+	TypeSetIntset       ValueType = 11
+	TypeZSetZiplist     ValueType = 12
+	TypeHashZiplist     ValueType = 13
+	TypeListQuicklist   ValueType = 14
+	TypeStreamListPacks ValueType = 15
 )
 
 const (
@@ -124,12 +132,15 @@ const (
 	rdb64bitLen = 0x81
 	rdbEncVal   = 3
 
-	rdbFlagAux      = 0xfa
-	rdbFlagResizeDB = 0xfb
-	rdbFlagExpiryMS = 0xfc
-	rdbFlagExpiry   = 0xfd
-	rdbFlagSelectDB = 0xfe
-	rdbFlagEOF      = 0xff
+	rdbFlagModuleAux = 247
+	rdbFlagIdle      = 248
+	rdbFlagFreq      = 249
+	rdbFlagAux       = 250
+	rdbFlagResizeDB  = 251
+	rdbFlagExpiryMS  = 252
+	rdbFlagExpiry    = 253
+	rdbFlagSelectDB  = 254
+	rdbFlagEOF       = 255
 
 	rdbEncInt8  = 0
 	rdbEncInt16 = 1
@@ -165,6 +176,25 @@ func (d *decode) decode() error {
 			return err
 		}
 		switch objType {
+		case rdbFlagModuleAux:
+			// TODO: implement this
+			return errors.New("rdb: unable to read Redis modules")
+		case rdbFlagIdle:
+			// TODO: we can keep track of this data
+			// instead of just reading it and dropping the result.
+			// Then we can return this info in the decode functions
+			_, _, err := d.readLength()
+			if err != nil {
+				return err
+			}
+		case rdbFlagFreq:
+			// TODO: we can keep track of this data
+			// instead of just reading it and dropping the result.
+			// Then we can return this info in the decode functions
+			_, _, err := d.readLength()
+			if err != nil {
+				return err
+			}
 		case rdbFlagAux:
 			auxKey, err := d.readString()
 			if err != nil {
@@ -258,6 +288,8 @@ func (d *decode) readObject(key []byte, typ ValueType, expiry int64) error {
 			d.readZiplist(key, 0, false)
 		}
 		d.event.EndList(key)
+	case TypeStreamListPacks:
+		d.readStream(key, expiry)
 	case TypeSet:
 		cardinality, _, err := d.readLength()
 		if err != nil {
@@ -327,11 +359,128 @@ func (d *decode) readObject(key []byte, typ ValueType, expiry int64) error {
 	case TypeHashZiplist:
 		return d.readZiplistHash(key, expiry)
 	case TypeModule:
-		return fmt.Errorf("rdb: unable to read Redis Modules RDB objects (key %s)", key)
+		// TODO: implement this
+		return fmt.Errorf("rdb: unable to read redis modules (key %s)", key)
 	default:
 		return fmt.Errorf("rdb: unknown object type %d for key %s", typ, key)
 	}
 	return nil
+}
+
+type ConsumerPendingEntry struct {
+	EID string
+}
+
+type StreamConsumerData struct {
+	Name string
+	SeenTime int64
+	PendingEntries []ConsumerPendingEntry
+}
+
+type CgroupPendingEntry struct {
+	EID string
+	DeliveryTime int64
+	DeliveryCount int
+}
+type StreamCgroupData struct {
+	Name string
+	LastEntryID string
+	PendingEntries []CgroupPendingEntry
+	ConsumerData   []StreamConsumerData
+}
+
+func (d *decode) readStream(key []byte, expiry int64) error {
+	listpacksCount, _, _ := d.readLength()
+	d.event.StartStream(key, int64(listpacksCount), expiry)
+	info := make([]StreamCgroupData, 0)
+
+	for i := uint32(0); i < listpacksCount; i++ {
+		entryID, _ := d.readString()
+		data, _ := d.readString()
+		d.event.StreamListPack(key, string(entryID), string(data))
+	}
+	itemsCount, _, _ := d.readLength()
+	lastEntryID, _ := d.getListPackEntryID()
+	cgroupsCount, _, _ := d.readLength()
+	for i := uint32(0); i < cgroupsCount; i++ {
+		cgName, _ := d.readString()
+		lastCgroupEntryID, _ := d.getListPackEntryID()
+		pendingCount, _, _ := d.readLength()
+		groupPendingEntries := make([]CgroupPendingEntry, 0)
+		for j := uint32(0); j < pendingCount; j++ {
+			eid := make([]byte, 16)
+			_, err := io.ReadFull(d.r, eid)
+			if err != nil {
+				return err
+			}
+			deliveryTime, _ := d.readMSTime()
+			deliveryCount, _, _ := d.readLength()
+			groupPendingEntry := CgroupPendingEntry{
+				EID: string(eid),
+				DeliveryTime: deliveryTime,
+				DeliveryCount: int(deliveryCount),
+			}
+			groupPendingEntries = append(groupPendingEntries, groupPendingEntry)
+		}
+		consumerData := make([]StreamConsumerData, 0)
+		consumerCount, _, _ := d.readLength()
+		for k := uint32(0); k < consumerCount; k++ {
+			cName, _ := d.readString()
+			seenTime, _ := d.readMSTime()
+			pendingCount, _, _ = d.readLength()
+			consumerPendingEntries := make([]ConsumerPendingEntry, 0)
+			for l := uint32(0); l < pendingCount; l++ {
+				eid := make([]byte, 16)
+				_, err := io.ReadFull(d.r, eid)
+				if err != nil {
+					return err
+				}
+				pendingEntry := ConsumerPendingEntry {
+					EID: string(eid),
+				}
+				consumerPendingEntries = append(consumerPendingEntries, pendingEntry)
+			}
+			streamConsumerDataEntry := StreamConsumerData{
+				Name: string(cName),
+				SeenTime: seenTime,
+				PendingEntries: consumerPendingEntries,
+			}
+			consumerData = append(consumerData, streamConsumerDataEntry)
+		}
+		cgroupData := StreamCgroupData{
+			Name: string(cgName),
+			LastEntryID: lastCgroupEntryID,
+			PendingEntries: groupPendingEntries,
+			ConsumerData: consumerData,
+
+		}
+		info = append(info, cgroupData)
+	}
+	d.event.EndStream(key, int(itemsCount), lastEntryID, info)
+	return nil
+}
+
+func (d *decode) readMSTime() (int64, error) {
+	timestamp := make([]byte, 8)
+	_, err := io.ReadFull(d.r, timestamp)
+	if err != nil {
+		return int64(-1), err
+	}
+	return int64(binary.LittleEndian.Uint64(timestamp)) * 1000, nil
+}
+
+func (d *decode) getListPackEntryID() (string, error) {
+	ts, _, err := d.readLength()
+	if err != nil {
+		return "", err
+	}
+	db, _, err := d.readLength()
+	if err != nil {
+		return "", err
+	}
+	tsString := strconv.FormatUint(uint64(ts), 10)
+	dbString := strconv.FormatUint(uint64(db), 10)
+	return fmt.Sprintf("%s-%s", tsString, dbString), nil
 }
 
 func (d *decode) readZipmap(key []byte, expiry int64) error {
@@ -641,7 +790,7 @@ func (d *decode) checkHeader() error {
 	}
 
 	version, _ := strconv.ParseInt(string(header[5:]), 10, 64)
-	if version < 1 || version > 8 {
+	if version < 1 || version > 9 {
 		return fmt.Errorf("rdb: invalid RDB version number %d", version)
 	}
 
@@ -811,7 +960,6 @@ func (d *decode) readLength() (uint32, bool, error) {
 			length, err := d.readUint32Big()
 			return length, false, err
 		}
-		
 	}
 
 	panic("not reached")
