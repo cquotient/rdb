@@ -394,6 +394,8 @@ func (d *decode) readStream(key []byte, expiry int64) error {
 	d.event.StartStream(key, int64(listpacksCount), expiry)
 	info := make([]StreamCgroupData, 0)
 
+	// ListPack is redis's bizarre way of representing lists of strings
+	// in a memory efficient way
 	for i := uint32(0); i < listpacksCount; i++ {
 		entryID, _ := d.readString()
 		data, _ := d.readString()
@@ -402,11 +404,13 @@ func (d *decode) readStream(key []byte, expiry int64) error {
 	itemsCount, _, _ := d.readLength()
 	lastEntryID, _ := d.getListPackEntryID()
 	cgroupsCount, _, _ := d.readLength()
+	// Loop through each consumer group of the stream
 	for i := uint32(0); i < cgroupsCount; i++ {
 		cgName, _ := d.readString()
 		lastCgroupEntryID, _ := d.getListPackEntryID()
 		pendingCount, _, _ := d.readLength()
 		groupPendingEntries := make([]CgroupPendingEntry, 0)
+		// Loop through pending entries
 		for j := uint32(0); j < pendingCount; j++ {
 			eid := make([]byte, 16)
 			_, err := io.ReadFull(d.r, eid)
@@ -424,6 +428,7 @@ func (d *decode) readStream(key []byte, expiry int64) error {
 		}
 		consumerData := make([]StreamConsumerData, 0)
 		consumerCount, _, _ := d.readLength()
+		// Loop through each consumer of each consumer group
 		for k := uint32(0); k < consumerCount; k++ {
 			cName, _ := d.readString()
 			seenTime, _ := d.readMSTime()
@@ -452,8 +457,8 @@ func (d *decode) readStream(key []byte, expiry int64) error {
 			LastEntryID: lastCgroupEntryID,
 			PendingEntries: groupPendingEntries,
 			ConsumerData: consumerData,
-
 		}
+		// Info contains metadata about the stream
 		info = append(info, cgroupData)
 	}
 	d.event.EndStream(key, int(itemsCount), lastEntryID, info)
